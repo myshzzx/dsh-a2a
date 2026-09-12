@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `server.sharedCwd` (default `false`) lets every A2A session share one working
+  directory: sessions run in `<server.cwd>/shared` instead of a per-session
+  `A2A-*` sandbox subdirectory, and they group under a single sidebar workspace
+  titled `server.workspaceTitle`. Off (the default) keeps the per-session
+  sandbox isolation introduced in 0.4.2. Env `A2A_SHARED_CWD=1`.
+
 ## [0.6.0] - 2026-08-30
 
 ### Added

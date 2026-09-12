@@ -39,6 +39,12 @@ export interface ServerOptions {
   model?: string
   /** Working directory for A2A conversation agents; doubles as the sidebar workspace path. */
   cwd?: string
+  /**
+   * Share one working directory across every A2A session (defaults to false).
+   * When on, all sessions run in `<cwd>/shared` instead of a per-session
+   * `A2A-*` sandbox subdirectory, and they group under one sidebar workspace.
+   */
+  sharedCwd?: boolean
   /** Sidebar workspace title grouping A2A conversations (defaults to "A2A"). */
   workspaceTitle?: string
   /**
@@ -85,6 +91,7 @@ export const Config: z<Config> = z.object({
     provider: z.string(),
     model: z.string(),
     cwd: z.string(),
+    sharedCwd: z.boolean().default(false),
     workspaceTitle: z.string().default('A2A'),
     allowOverrides: z.boolean().default(true),
   }),
@@ -112,6 +119,8 @@ export interface ResolvedServer {
   provider?: string
   model?: string
   cwd: string
+  /** Whether every session shares one working directory (`<cwd>/shared`). */
+  sharedCwd: boolean
   workspaceTitle: string
   /** Whether callers may override the preset and the model route per request. */
   allowOverrides: boolean
@@ -222,6 +231,7 @@ export function resolveConfig(input: Config): ResolvedConfig {
       provider,
       model,
       cwd,
+      sharedCwd: server.sharedCwd === true,
       workspaceTitle,
       allowOverrides: server.allowOverrides !== false,
       agentCard: {

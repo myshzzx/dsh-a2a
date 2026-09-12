@@ -25,6 +25,10 @@
           # Dedicated workspace directory: A2A conversations appear under the
           # "A2A" group in the sidebar (defaults to ~/.a2a-sessions).
           cwd: !!js process.env.DSH_A2A_CWD
+          # Share one working directory across every A2A session: they run in
+          # <cwd>/shared instead of a per-session sandbox subdirectory, and
+          # group under the single workspace below. Set A2A_SHARED_CWD=1.
+          sharedCwd: !!js process.env.A2A_SHARED_CWD === '1'
           workspaceTitle: A2A
           preset: standard
           turnTimeoutMs: 300000

@@ -42,6 +42,11 @@ export interface ExecutorOptions {
   turnTimeoutMs: number
   /** Working directory for A2A conversation agents; doubles as the sidebar workspace path. */
   cwd?: string
+  /**
+   * Run every session in one shared working directory (`<cwd>/shared`) instead
+   * of a per-session sandbox subdirectory; they then group under one workspace.
+   */
+  sharedCwd?: boolean
   /** Sidebar workspace title grouping A2A conversations. */
   workspaceTitle?: string
   /** Explicit model route; falls back to the harness default model. */
@@ -80,6 +85,9 @@ const PRESET_VALUE = /^[A-Za-z0-9._-]{1,64}$/
 const PROVIDER_VALUE = /^[A-Za-z0-9._-]{1,64}$/
 /** Model ids are provider-owned and carry their own punctuation. */
 const MODEL_VALUE = /^[A-Za-z0-9._:@/-]{1,128}$/
+
+/** Subdirectory of the configured base every session shares when `sharedCwd` is on. */
+const SHARED_DIR_NAME = 'shared'
 
 interface WorkspaceRegistry {
   create(path: string, title: string): Promise<Workspace>
@@ -651,11 +659,13 @@ export class DshAgentExecutor implements AgentExecutor {
   }
 
   /**
-   * Best-effort attach of one A2A session to its per-session sidebar workspace.
-   * Each A2A session runs in its own cwd (see sessionDir), and workspace
-   * membership validates the session cwd against the workspace path, so the
-   * grouping workspace is per-session too — one sidebar row per A2A caller
-   * context. A session whose grouping fails must never fail the message itself.
+   * Best-effort attach of one A2A session to its grouping workspace.
+   *
+   * By default each A2A session runs in its own cwd (see sessionDir), and
+   * workspace membership validates the session cwd against the workspace path,
+   * so the grouping workspace is per-session too — one sidebar row per A2A
+   * caller context. With `sharedCwd` on every session shares one cwd, hence one
+   * workspace row. A session whose grouping fails must never fail the message.
    */
   async attachToWorkspace(sessionId: string, contextId?: string): Promise<void> {
     try {
@@ -667,31 +677,33 @@ export class DshAgentExecutor implements AgentExecutor {
   }
 
   /**
-   * Resolve the per-session grouping workspace. Failures (including a
-   * not-yet-mounted registry) are forgotten so the next call retries instead of
-   * caching the miss forever.
+   * Resolve the grouping workspace for a session. Keyed by the resolved
+   * directory, so in shared mode every session reuses one workspace instead of
+   * minting a duplicate row. Failures (including a not-yet-mounted registry)
+   * are forgotten so the next call retries instead of caching the miss forever.
    */
   private ensureWorkspace(sessionId: string, contextId?: string): Promise<Workspace | undefined> {
     this.workspacePromise ??= new Map()
-    const cached = this.workspacePromise.get(sessionId)
+    const key = this.sessionDir(SessionId(sessionId), contextId ?? sessionId)
+    const cached = this.workspacePromise.get(key)
     if (cached !== undefined) return cached
     const current = this.openWorkspace(sessionId, contextId).then(
       (workspace) => {
-        if (workspace === undefined) this.forgetWorkspace(sessionId, current)
+        if (workspace === undefined) this.forgetWorkspace(key, current)
         return workspace
       },
       (error) => {
-        this.forgetWorkspace(sessionId, current)
+        this.forgetWorkspace(key, current)
         throw error
       },
     )
-    this.workspacePromise.set(sessionId, current)
+    this.workspacePromise.set(key, current)
     return current
   }
 
-  private forgetWorkspace(sessionId: string, current: Promise<Workspace | undefined>): void {
-    if (this.workspacePromise?.get(sessionId) === current) {
-      this.workspacePromise.delete(sessionId)
+  private forgetWorkspace(key: string, current: Promise<Workspace | undefined>): void {
+    if (this.workspacePromise?.get(key) === current) {
+      this.workspacePromise.delete(key)
     }
   }
 
@@ -703,6 +715,17 @@ export class DshAgentExecutor implements AgentExecutor {
     if (registry === undefined) return undefined
     const cwd = this.sessionDir(SessionId(sessionId), contextId ?? sessionId)
     await mkdir(cwd, { recursive: true })
+    return registry.create(cwd, this.workspaceTitleFor(cwd, sessionId))
+  }
+
+  /**
+   * Sidebar title for the workspace at `cwd`. In shared mode every session
+   * lands in the same directory, so it takes the plain configured title;
+   * otherwise the title is derived from the minted per-session directory name.
+   */
+  private workspaceTitleFor(cwd: string, sessionId: string): string {
+    const base = this.options.workspaceTitle ?? 'A2A'
+    if (this.options.sharedCwd === true) return base
     const dirName = cwd.split('/').pop() ?? ''
     const stripped = dirName.replace(/^A2A-/, '').replace(/-[^-]*$/, '')
     const m = /^(.+)-(\d{4})-(\d{2})(\d{2})(\d{2})$/.exec(stripped)
@@ -715,14 +738,17 @@ export class DshAgentExecutor implements AgentExecutor {
       m[5] !== undefined
         ? `${m[1]} ${m[2].slice(0, 2)}-${m[2].slice(2)} ${m[3]}:${m[4]}:${m[5]}`
         : sessionId
-    const title = `${this.options.workspaceTitle ?? 'A2A'} · ${suffix}`
-    return registry.create(cwd, title)
+    return `${base} · ${suffix}`
   }
 
   /**
-   * Per-session sandbox cwd: every A2A session gets its own subdirectory under
-   * the configured base, so the harness sandbox fence (workspace-write against
-   * SessionHeader.cwd) isolates each caller context's filesystem.
+   * The sandbox cwd for one session.
+   *
+   * By default every A2A session gets its own subdirectory under the configured
+   * base, so the harness sandbox fence (workspace-write against
+   * SessionHeader.cwd) isolates each caller context's filesystem. With
+   * `sharedCwd` on, every session instead runs in `<base>/shared` — the fence
+   * still bounds writes, but all callers share one directory.
    *
    * Directory naming: `A2A-{caller}-{MMDD}-{hash6}` — a readable slug of
    * the caller's contextId, the session's first-seen month-day, and 6 hash
@@ -732,6 +758,7 @@ export class DshAgentExecutor implements AgentExecutor {
    */
   private sessionDir(sessionId: SessionId, contextId: string): string {
     const base = this.options.cwd ?? process.cwd()
+    if (this.options.sharedCwd === true) return join(base, SHARED_DIR_NAME)
     const sid = String(sessionId)
     const hash6 = sid.slice(-6)
     const pattern = new RegExp(`^A2A-.*-${hash6}$`)

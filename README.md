@@ -18,7 +18,7 @@ One plugin, two halves, built on the official [`@a2a-js/sdk`](https://github.com
 - 🔒 **Header auth on the client side** — per-agent headers with `${ENV_VAR}` placeholders resolved at call time; credentials never sit in the config.
 - 🔑 **Bearer auth on the server side** — with `server.apiKey` set, every request except the Agent Card must present `Authorization: Bearer <key>`; the card can also advertise a `publicUrl` behind a reverse proxy.
 - 🎛️ **Per-request preset and model** — a caller can name the preset and the model route on the A2A `metadata` map instead of using the deployment's route (see [Per-request overrides](#-per-request-overrides)).
-- 🧭 **Model route and workspace** — A2A conversations can pin a provider/model pair and live in their own workspace group (`A2A`, `~/.a2a-sessions` by default).
+- 🧭 **Model route and workspace** — A2A conversations can pin a provider/model pair and live in their own workspace group (`A2A`, `~/.a2a-sessions` by default); `server.sharedCwd` puts every session in one shared directory instead.
 - ⏱️ **Turn deadlines** — a slow turn is cancelled (`turnTimeoutMs`, default 5 min) so the next message is never stuck.
 - 🛡️ **Fail-loud config** — bad URLs, empty names, or out-of-range ports throw at plugin load.
 - 🧪 **Real-wire tests** — the server half is exercised end to end with the official A2A client over a live HTTP port.
@@ -80,7 +80,8 @@ The mounted row lives in `~/.dsh/profiles/web/cordis.patch.yml`:
 | `server.publicUrl` | — | Public URL advertised on the Agent Card (required behind a reverse proxy); env `A2A_PUBLIC_URL` |
 | `server.apiKey` | — | When set, every request except the Agent Card must present `Authorization: Bearer <key>`; env `A2A_API_KEY` |
 | `server.provider` / `server.model` | — | Model route for A2A conversations, must be set as a pair; falls back to the harness default model; env `A2A_PROVIDER` / `A2A_MODEL` |
-| `server.cwd` | `~/.a2a-sessions` | Working directory for A2A conversations (doubles as the sidebar workspace path); env `DSH_A2A_CWD` |
+| `server.cwd` | `~/.a2a-sessions` | Base working directory for A2A conversations; per-session sandbox dirs live under it (shared mode uses `<cwd>/shared`); env `DSH_A2A_CWD` |
+| `server.sharedCwd` | `false` | Run every session in one shared directory `<cwd>/shared` instead of a per-session sandbox dir; they then group under one workspace; env `A2A_SHARED_CWD=1` |
 | `server.workspaceTitle` | `A2A` | Sidebar group title for A2A conversations |
 | `server.agentCard.*` | — | Agent Card identity shown to callers |
 | `agents[].name` / `url` | — | Registry name for `a2a_call` + Agent Card URL |
@@ -172,13 +173,14 @@ Patch-layer changes are read at assembly time — restart `dsh web` to apply the
 
 - Inbound authentication: since 0.3.0 `server.apiKey` enforces a Bearer token on every request except the Agent Card (which must stay publicly readable); for larger deployments, still put the port behind an authenticating gateway or a reverse proxy. The Agent Card advertises no security schemes.
 - One executor instance serves every context; sessions resume across turns but a dsh restart creates fresh in-memory state (session persistence via `sessionPersistence` is a planned follow-up).
+- Working-directory isolation: by default each A2A context runs in its own sandbox subdirectory under `server.cwd`, isolating callers' filesystems. `server.sharedCwd: true` deliberately gives that up — every session runs in `<cwd>/shared`, so all callers share one directory (and one sidebar workspace).
 - A `model` override switches sessions this executor instance created. One adopted from outside it — opened in the web UI, or resumed from disk — has no route handle to switch, so the override is logged and ignored; the reply keeps the model it was created with. Sending the model again after the executor creates the session works as expected.
 - ~~Outbound registry edits require a profile patch + restart~~ **0.2.0: GUI-configurable.** The Plugins → Plugin configuration section ships an "A2A remote agents" card over the `a2a` settings namespace (schema defaults → row-config base → user overrides); a save hot-reloads the running tools, and a reset re-inherits the deployment registry.
 
 ## 🧪 Development
 
 ```sh
-npm run check   # biome + typecheck + vitest (49 tests) + build
+npm run check   # biome + typecheck + vitest (51 tests) + build
 ```
 
 The suite covers config validation, the Agent Card + JSON-RPC round trip through the official A2A client against a real HTTP listener, per-context session continuity, task cancellation, header auth, per-request overrides, and the model-facing tools.

@@ -4,6 +4,8 @@
  * end to end with the official A2A client.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { Message } from '@a2a-js/sdk'
 import { Role as RoleEnum, TaskState } from '@a2a-js/sdk'
@@ -367,6 +369,74 @@ describe('A2A server with a harness executor', () => {
     expect(cwd).toBe(join('/tmp/a2a-ws-test', basename(cwd)))
     expect(basename(cwd)).toMatch(/^A2A-ctx-1-\d{4}-\d{6}-9fa507$/)
     expect(creates[0]?.meta).toMatchObject({ agentPreset: 'standard' })
+  })
+
+  it('runs every session in one shared directory when sharedCwd is on', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'dsh-a2a-shared-'))
+    try {
+      const agents = new Map<string, FakeAgent>()
+      const ctx = fakeCtx(agents)
+      const creates: Array<{ meta?: { cwd?: string } }> = []
+      const workspaces: Array<{ path: string; title: string }> = []
+      const scoped = ctx as unknown as {
+        agents: { create: (options: { meta?: { cwd?: string } }) => Promise<unknown> }
+        get: (name: string) => unknown
+      }
+      scoped.agents.create = async (options) => {
+        creates.push(options)
+        return { agent: new FakeAgent(), dispose: async () => undefined }
+      }
+      scoped.get = (name: string) => {
+        if (name === 'workspaceRegistry') {
+          return {
+            create: async (path: string, title: string) => {
+              workspaces.push({ path, title })
+              return { attachSession: async () => undefined }
+            },
+          }
+        }
+        if (name === 'agentDefaultModel') {
+          return { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
+        }
+        if (name === 'agentPresets') {
+          return { resolve: async () => ({ id: 'standard' }), mount: async () => undefined }
+        }
+        return undefined
+      }
+      const executor = new DshAgentExecutor(ctx, {
+        preset: 'standard',
+        turnTimeoutMs: 10_000,
+        cwd: base,
+        sharedCwd: true,
+        workspaceTitle: 'A2A',
+      })
+      const { bus } = collectingBus()
+      for (const contextId of ['ctx-1', 'ctx-2']) {
+        await executor.execute(
+          {
+            taskId: `task-${contextId}`,
+            contextId,
+            context: {},
+            userMessage: userMessage('hello'),
+            request: {
+              tenant: '',
+              message: userMessage('hello'),
+              configuration: undefined,
+              metadata: undefined,
+            },
+          } as never,
+          bus,
+        )
+        await executor.attachToWorkspace(String(sessionIdFor(contextId)), contextId)
+      }
+      // Every session runs in the one shared directory ...
+      const shared = join(base, 'shared')
+      expect(creates.map((call) => call.meta?.cwd)).toEqual([shared, shared])
+      // ... and they group under a single plainly titled workspace.
+      expect(workspaces).toEqual([{ path: shared, title: 'A2A' }])
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 
   it('validates the A2A workspace defaults and the provider/model pair', () => {

@@ -10,9 +10,15 @@ describe('resolveConfig', () => {
       port: 8899,
       preset: 'standard',
       turnTimeoutMs: 300_000,
+      sharedCwd: false,
       agentCard: { name: 'dsh-a2a' },
     })
     expect(resolved.agents).toEqual([])
+  })
+
+  it('defaults to per-session dirs and honours sharedCwd', () => {
+    expect(resolveConfig({}).server.sharedCwd).toBe(false)
+    expect(resolveConfig({ server: { sharedCwd: true } }).server.sharedCwd).toBe(true)
   })
 
   it('rejects out-of-range ports and non-positive timeouts', () => {

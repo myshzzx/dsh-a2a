@@ -18,7 +18,7 @@
 - 🔒 **客户端 header 鉴权**——每个 agent 的 headers 支持 `${ENV_VAR}` 占位符调用时解析，凭证不进配置
 - 🔑 **服务端 Bearer 鉴权**——设了 `server.apiKey` 后，除 Agent Card 外的所有请求须带 `Authorization: Bearer <key>`；Agent Card 还可宣告反代后的 `publicUrl`
 - 🎛️ **请求级 preset 与模型**——调用方可通过 A2A `metadata` 指定 preset 与模型路由，而不必沿用部署方的路由（见[请求级覆盖](#-请求级覆盖)）
-- 🧭 **独立模型路由与工作区**——A2A 会话可指定 provider/model 对，并归入专属 workspace（默认 `A2A` 分组、`~/.a2a-sessions` 目录）
+- 🧭 **独立模型路由与工作区**——A2A 会话可指定 provider/model 对，并归入专属 workspace（默认 `A2A` 分组、`~/.a2a-sessions` 目录）；开启 `server.sharedCwd` 后所有会话共用一个目录
 - ⏱️ **单轮超时**——慢轮次主动 cancel（`turnTimeoutMs`，默认 5 分钟），下一条消息不会被卡住
 - 🛡️ **配置失败即报错**——非法 URL、空名字、越界端口在插件加载时抛出
 - 🧪 **真线格式测试**——server 半身用官方 A2A client 走真实 HTTP 端口端到端验证
@@ -80,7 +80,8 @@ curl -s http://127.0.0.1:8899/ -H 'Content-Type: application/json' \
 | `server.publicUrl` | — | Agent Card 上对外宣告的公开 URL（反代后必设）；env `A2A_PUBLIC_URL` |
 | `server.apiKey` | — | 设置后除 Agent Card 外的请求须带 `Authorization: Bearer <key>`；env `A2A_API_KEY` |
 | `server.provider` / `server.model` | — | A2A 会话模型路由，必须成对设置；缺省用 harness 默认模型；env `A2A_PROVIDER` / `A2A_MODEL` |
-| `server.cwd` | `~/.a2a-sessions` | A2A 会话工作目录（兼作侧边栏 workspace 路径）；env `DSH_A2A_CWD` |
+| `server.cwd` | `~/.a2a-sessions` | A2A 会话基础工作目录，每会话沙箱子目录建在其下（共享模式用 `<cwd>/shared`）；env `DSH_A2A_CWD` |
+| `server.sharedCwd` | `false` | 所有会话共用一个目录 `<cwd>/shared`，不再每会话新建沙箱子目录，并归入同一个 workspace；env `A2A_SHARED_CWD=1` |
 | `server.workspaceTitle` | `A2A` | 侧边栏 A2A 会话分组标题 |
 | `server.agentCard.*` | — | 展示给调用方的 Agent Card 身份 |
 | `agents[].name` / `url` | — | `a2a_call` 用的注册名 + Agent Card URL |
@@ -172,13 +173,14 @@ patch 层改动在装配期读取，改完需重启 `dsh web` 才生效；GUI �
 
 - 入站鉴权：0.3.0 起可设 `server.apiKey` 开启 Bearer token 校验（Agent Card 除外——它必须公开可读）；大规模部署仍建议再套鉴权网关或反代，Agent Card 不声明 security scheme
 - 单个 executor 实例服务所有 context；跨轮次延续会话，但 dsh 重启后内存态重建（`sessionPersistence` 持久化是规划中的后续）
+- 工作目录隔离：默认每个 A2A context 在 `server.cwd` 下拥有独立沙箱子目录，隔离各调用方的文件系统。`server.sharedCwd: true` 是**有意放弃**这层隔离——所有会话都跑在 `<cwd>/shared`，共用一个目录（和同一个侧边栏 workspace）
 - `model` 覆盖只能切换本 executor 实例创建的会话；从外部 adopt 来的会话（在 web UI 打开过、或从磁盘恢复的）没有可切换的路由句柄，覆盖值记日志后忽略，回复沿用创建时的模型。会话由本 executor 创建之后再发 model 则正常切换
 - **0.2.0 起注册表支持 GUI 配置**：设置 → 插件 → 插件配置里的「A2A 远程 agent」卡片可直接增删改注册表，保存即热更新 `a2a_call` / `a2a_list`，无需重启；重置则恢复部署默认（cordis 行配置）。配置落在 settings 文档的 `a2a` 命名空间，解析层级为 schema 默认值 → 行配置 base → 用户覆盖
 
 ## 🧪 开发
 
 ```sh
-npm run check   # biome + typecheck + vitest（49 个测试）+ 构建
+npm run check   # biome + typecheck + vitest（51 个测试）+ 构建
 ```
 
 测试覆盖配置校验、官方 A2A client 走真实 HTTP 端口的 Agent Card + JSON-RPC 往返、按 context 会话延续、任务取消、header 鉴权、请求级覆盖与模型工具。

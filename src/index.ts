@@ -77,6 +77,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       preset: resolved.server.preset,
       turnTimeoutMs: resolved.server.turnTimeoutMs,
       cwd: resolved.server.cwd,
+      sharedCwd: resolved.server.sharedCwd,
       workspaceTitle: resolved.server.workspaceTitle,
       provider: resolved.server.provider,
       model: resolved.server.model,
