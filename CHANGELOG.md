@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-08-31
+
+### Changed
+
+- **Served-agent cards are editable per card** (settings tab) — the inbound
+  panel merged the read-only Agent Card list with the global "edit identity"
+  mode into per-card editing: each agent is one card with its own Edit /
+  Remove, Edit expands that single card's form (id / name / description /
+  preset / cwd / workspace / provider / model), and "Add agent" appends a card
+  and opens it. The draft re-seeds from the served set on an external write /
+  reset / save without clobbering an in-progress edit.
+- **Inbound summary decluttered** — the model-route (“follows the harness
+  default”), preset, and caller-override info rows were removed from the
+  inbound grid; status / listen / public URL / workspace group and the
+  auth-token block stay.
+- **Tutorial no longer inlines a card address** — the how-to popover points at
+  the address on each agent card instead of rendering a single URL (the cards
+  already show it); `tutorialStep1` copy updated accordingly.
+
+## [0.7.0] - 2026-08-31
+
+### Added
+
+- **Multi-agent server** — one endpoint now serves several local agents, each
+  at its own `/agents/<id>` with its own preset, model route, workspace group,
+  Agent Card identity, and `skills`. The root `/.well-known/agent-card.json`
+  discovery returns the first agent; every agent is addressed by path.
+- **Per-agent skills on the Agent Card** — `server.agents[].skills` advertises
+  each agent's abilities as A2A `AgentSkill[]` (id / name / description) on
+  its own card, so an A2A client sees what each agent is for.
+- **Live served-agent management in the settings tab** — the inbound identity
+  editor can add / remove / re-identity a served agent; a save reconciles the
+  running server (a new agent is mounted, a dropped agent is disposed, an
+  edited identity is hot-applied) without a restart.
+- **Endpoint token view + rotation** — the settings tab shows the Bearer key
+  (masked by default, with reveal + copy) and can rotate it; the new key is
+  applied live to the running server and persisted to the `a2a` settings
+  document so it survives a restart.
+- **Per-agent Agent Card addresses** — the inbound panel lists each served
+  agent's own card URL at `/agents/<id>/.well-known/agent-card.json`, styled to
+  match the outbound registry (preset chip + name + path + description + copy).
+
+### Changed
+
+- The settings tab no longer rides a Typert Remote service: `/api/a2a/*`
+  (`serverInfo`, `testAgentCard`, `regenerateKey`) are plain `webServer`
+  routes mounted once the web server is ready, so the panel no longer 404s.
+
+### Fixed
+
+- **REST `message:send` (issue #1)** — the handler passed the request body
+  `Buffer` straight to `restBody()`, whose `body.message ?? {}` read `.message`
+  off the buffer and always got `undefined`, so every REST call failed with
+  `message.messageId is required`. The body is now parsed as UTF-8 then JSON.
+- **Half model override** — a request that named only `model` (or only
+  `provider`) no longer fails the task when the deployment cannot complete the
+  pair; it falls back to the configured/default route with a warning.
+
 ## [0.6.0] - 2026-08-30
 
 ### Added

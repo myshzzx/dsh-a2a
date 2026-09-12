@@ -1,34 +1,67 @@
 /**
  * The GUI-editable settings half: one `a2a` namespace over the dsh settings
  * service, resolved as schema defaults → composition base (the cordis row's
- * `agents` and `agentCard`) → the user document (what the A2A settings tab
+ * `agents` and `serverAgents`) → the user document (what the A2A settings tab
  * writes).
  *
- * Every commit hot-reloads the running `a2a_call` / `a2a_list` tools and the
- * served Agent Card — a save is live without a restart. The settings service
- * is optional: profiles without a provider keep resolving entry config alone.
+ * Every commit hot-reloads the running `a2a_call` / `a2a_list` tools AND the
+ * served Agent Card set (add / remove / re-identity a served agent) — a save
+ * is live without a restart. The settings service is optional: profiles
+ * without a provider keep resolving entry config alone.
  *
  * @module dsh-a2a/settings
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { type AgentEntry, normalizeAgents, type ResolvedAgentEntry } from './config.js'
+import {
+  type AgentEntry,
+  type AgentSkillSpec,
+  normalizeAgents,
+  normalizeServerAgents,
+  type ResolvedAgentEntry,
+  type ResolvedAgentSpec,
+  type ServerAgentDefaults,
+} from './config.js'
 
 /** The settings namespace the A2A settings tab claims. */
 export const SETTINGS_NAMESPACE = 'a2a'
 
+/**
+ * One served-agent row as stored in the settings document. Blank fields are
+ * normalized in `apply` against the matching base agent (by id) then the
+ * server defaults, so a row that only edits identity keeps the deployment's
+ * preset / cwd.
+ */
+export interface ServerAgentSpec {
+  id: string
+  name: string
+  description: string
+  version: string
+  preset: string
+  cwd: string
+  workspaceTitle: string
+  provider?: string
+  model?: string
+  /** Abilities advertised on the Agent Card (inherited from the base by id). */
+  skills?: AgentSkillSpec[]
+}
+
 /** The section the settings schema resolves; see {@link A2aSettings}. */
 export interface A2aSettingsValue {
   agents: AgentEntry[]
-  agentCard: { name: string; description: string }
+  serverAgents: ServerAgentSpec[]
+  /** Bearer key for the A2A endpoint (empty = inherit the composition base). */
+  apiKey: string
 }
 
 /** What the plugin actually applies from a resolved section. */
 export interface A2aSettingsApplied {
   agents: ResolvedAgentEntry[]
-  /** Full Agent Card identity: blank fields fall back to the composition base. */
-  agentCard: { name: string; description: string }
+  /** The full served-agent set (identity + preset + cwd) to reconcile. */
+  serverAgents: ResolvedAgentSpec[]
+  /** The served Bearer key (empty means "unset": auth stays off / base). */
+  apiKey?: string
 }
 
 /** One registry row as stored in the settings document. */
@@ -39,19 +72,37 @@ export const AgentEntrySettings = z.object({
   headers: z.dict(z.string()).default({}),
 })
 
+/** One served-agent row as stored in the settings document (blank = inherit). */
+export const AgentSpecSettings = z.object({
+  id: z.string(),
+  name: z.string().default(''),
+  description: z.string().default(''),
+  version: z.string().default(''),
+  preset: z.string().default(''),
+  cwd: z.string().default(''),
+  workspaceTitle: z.string().default(''),
+  provider: z.string(),
+  model: z.string(),
+  skills: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        description: z.string(),
+      }),
+    )
+    .default([]),
+})
+
 /**
- * The `a2a` namespace schema: the outbound registry plus the Agent Card
- * identity override. Blank fields fall back to the composition base (the
- * cordis row), never to the hard-coded defaults.
+ * The `a2a` namespace schema: the outbound registry, the served-agent set, and
+ * the endpoint Bearer key. Blank fields fall back to the composition base (the
+ * cordis row) and the server defaults, never to the hard-coded defaults.
  */
 export const A2aSettings = z.object({
   agents: z.array(AgentEntrySettings).default([]),
-  agentCard: z
-    .object({
-      name: z.string().default(''),
-      description: z.string().default(''),
-    })
-    .default({ name: '', description: '' }),
+  serverAgents: z.array(AgentSpecSettings).default([]),
+  apiKey: z.string().default(''),
 })
 
 /**
@@ -66,44 +117,66 @@ interface SettingsService {
   ): {
     get(): A2aSettingsValue | undefined
     watch(listener: (next: A2aSettingsValue) => void): () => void
+    set(field: string, value: unknown): Promise<void>
   }
 }
 
 /**
  * Register the `a2a` namespace when a settings service is present and feed
  * every resolved section — the initial value included — to `onChange`.
- * Invalid rows are dropped with a warning; a blank agent-card field means
- * "inherit the composition base" and is omitted from the applied override.
+ * Invalid rows are dropped with a warning; a blank served-agent field means
+ * "inherit the composition base" (by id) then the server defaults.
+ *
+ * Returns a `persistApiKey` handle so the Host can rotate the endpoint key and
+ * store it in the settings document (survives a restart). Until the settings
+ * service is present the handle is a no-op; rotation still applies live.
  */
 export function attachSettings(
   ctx: Context,
-  base: { agents: AgentEntry[]; agentCard: { name: string; description: string } },
+  base: { agents: AgentEntry[]; serverAgents: ResolvedAgentSpec[]; apiKey?: string },
+  defaults: ServerAgentDefaults,
   onChange: (value: A2aSettingsApplied) => void,
-): void {
+): { persistApiKey(apiKey: string): void } {
+  const persister = { fn: (_apiKey: string): void => {} }
   ctx.inject(['settings'], (scoped) => {
     const settings = (scoped as unknown as { settings: SettingsService }).settings
     const scope = settings.register(SETTINGS_NAMESPACE, A2aSettings, {
       base: {
         agents: base.agents,
-        agentCard: { name: base.agentCard.name, description: base.agentCard.description },
+        serverAgents: base.serverAgents,
+        apiKey: base.apiKey ?? '',
       },
       applies: 'live',
     })
+    persister.fn = (apiKey) => {
+      void scope.set('apiKey', apiKey)
+    }
     const apply = (value: A2aSettingsValue | undefined): void => {
       if (value === undefined) return
       const { agents, rejected } = normalizeAgents(value.agents)
       if (rejected > 0) {
         ctx.logger.warn(`dsh-a2a: dropped ${String(rejected)} invalid agent row(s) from settings`)
       }
-      onChange({
-        agents,
-        agentCard: {
-          name: value.agentCard.name.trim() || base.agentCard.name,
-          description: value.agentCard.description.trim() || base.agentCard.description,
-        },
-      })
+      const normalized =
+        value.serverAgents.length > 0
+          ? normalizeServerAgents(value.serverAgents, base.serverAgents, defaults)
+          : { agents: base.serverAgents, rejected: 0 }
+      // If every settings row was invalid (or none were given), the served set
+      // falls back to the composition base so one bad hand edit never empties
+      // the endpoint.
+      const serverAgents =
+        normalized.agents.length > 0 ? normalized : { agents: base.serverAgents, rejected: 0 }
+      if (serverAgents.rejected > 0) {
+        ctx.logger.warn(
+          `dsh-a2a: dropped ${String(serverAgents.rejected)} invalid served-agent row(s) from settings`,
+        )
+      }
+      const apiKey =
+        typeof value.apiKey === 'string' && value.apiKey.length > 0 ? value.apiKey : base.apiKey
+      onChange({ agents, serverAgents: serverAgents.agents, apiKey })
     }
     ctx.effect(() => scope.watch(apply), 'dsh-a2a.settings.watch')
     apply(scope.get())
   })
+  return { persistApiKey: (apiKey) => persister.fn(apiKey) }
 }
