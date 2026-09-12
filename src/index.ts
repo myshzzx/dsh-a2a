@@ -17,12 +17,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { type Config as PluginConfig, resolveConfig } from './config.js'
+import { type Config as PluginConfig, type ResolvedAgentSpec, resolveConfig } from './config.js'
 import { DshAgentExecutor } from './executor.js'
+import { registerA2aRoutes } from './routes.js'
 import { A2aServer } from './server.js'
 import { attachSettings } from './settings.js'
 import { A2aRegistry, a2aTools } from './tools.js'
-import { A2aTestService, type ServerRef } from './typert.js'
+import type { ServerRef } from './typert.js'
 
 export const name = 'dsh-a2a'
 export const inject = ['agents', 'tools', 'attachments']
@@ -31,13 +32,15 @@ export { callAgent, DEFAULT_CALL_TIMEOUT_MS, resolveHeaders, textOfResult } from
 export type {
   AgentCardOptions,
   AgentEntry,
+  AgentSkillSpec,
   Config as A2aConfig,
   ResolvedAgentEntry,
+  ResolvedAgentSpec,
   ResolvedConfig,
   ResolvedServer,
   ServerOptions,
 } from './config.js'
-export { Config, normalizeAgents, resolveConfig } from './config.js'
+export { Config, normalizeAgents, normalizeServerAgents, resolveConfig } from './config.js'
 export type { RequestOverrides } from './executor.js'
 export {
   collectReplyText,
@@ -46,11 +49,11 @@ export {
   sessionIdFor,
   textOf,
 } from './executor.js'
+export { registerA2aRoutes } from './routes.js'
 export { A2aServer, type A2aServerOptions, buildAgentCard, type RequestObserver } from './server.js'
 export { A2aSettings, attachSettings, SETTINGS_NAMESPACE } from './settings.js'
 export { A2aRegistry, type A2aToolOptions, a2aTools } from './tools.js'
 export {
-  A2aTestService,
   type AgentCardProbe,
   type ServerInfo,
   type ServerRef,
@@ -60,32 +63,38 @@ export {
 /** Mount the A2A endpoint and the model-facing tools, tied to the Cordis lifecycle. */
 export function apply(ctx: Context, config: PluginConfig): void {
   const resolved = resolveConfig(config)
-  // Host-side Remote surface for the settings tab (agent-card probe + server
+  const primaryCard = resolved.server.agents[0]
+  // Host-side HTTP routes for the settings tab (agent-card probe + server
   // summary). Reads through a mutable ref so settings-sourced Agent Card
   // overrides show up in serverInfo without a restart.
   const serverRef: ServerRef = {
     server: resolved.server.enabled ? resolved.server : undefined,
     agentCard: {
-      name: resolved.server.agentCard.name,
-      description: resolved.server.agentCard.description,
+      name: primaryCard?.name ?? resolved.server.agentCard.name,
+      description: primaryCard?.description ?? resolved.server.agentCard.description,
     },
   }
-  new A2aTestService(ctx, serverRef)
   let server: A2aServer | undefined
-  if (resolved.server.enabled) {
-    const executor = new DshAgentExecutor(ctx, {
-      preset: resolved.server.preset,
+  const buildExecutor = (agent: ResolvedAgentSpec): DshAgentExecutor =>
+    new DshAgentExecutor(ctx, {
+      agentId: agent.id,
+      preset: agent.preset,
       turnTimeoutMs: resolved.server.turnTimeoutMs,
-      cwd: resolved.server.cwd,
-      sharedCwd: resolved.server.sharedCwd,
-      workspaceTitle: resolved.server.workspaceTitle,
-      provider: resolved.server.provider,
-      model: resolved.server.model,
+      cwd: agent.cwd,
+      sharedCwd: agent.sharedCwd,
+      workspaceTitle: agent.workspaceTitle,
+      provider: agent.provider,
+      model: agent.model,
       allowOverrides: resolved.server.allowOverrides,
     })
+  const executors = resolved.server.agents.map((agent) => ({
+    agent,
+    executor: buildExecutor(agent),
+  }))
+  if (resolved.server.enabled) {
     server = new A2aServer({
       config: resolved.server,
-      executor,
+      agents: executors.map(({ agent, executor }) => ({ agent, executor })),
     })
     const bound = server
     ctx.effect(() => {
@@ -98,31 +107,45 @@ export function apply(ctx: Context, config: PluginConfig): void {
       }
     }, 'dsh-a2a.server')
     // Best-effort: after a restart, re-attach persisted a2a- conversations to
-    // the "A2A" workspace (the registry may mount after this row activates).
-    void reattachPersisted(ctx, executor)
+    // the grouping workspace (the registry may mount after this row activates).
+    for (const { executor } of executors) void reattachPersisted(ctx, executor)
   }
   const registry = new A2aRegistry(resolved.agents)
-  const tools = a2aTools(registry)
+  const tools = a2aTools(registry, { callTimeoutMs: resolved.server.callTimeoutMs })
   ctx.effect(() => ctx.tools.register(tools.list), 'dsh-a2a.a2a_list')
   ctx.effect(() => ctx.tools.register(tools.call), 'dsh-a2a.a2a_call')
-  // The GUI surface: settings commits (A2A settings tab) hot-reload the tools
-  // and the served Agent Card; profiles without a settings service keep the
-  // static cordis-row registry and identity.
-  attachSettings(
+  // The GUI surface: settings commits (A2A settings tab) hot-reload the tools,
+  // the served Agent Card set, and the endpoint key; profiles without a
+  // settings service keep the static cordis-row registry, identity, and key.
+  // Registered BEFORE the HTTP routes so the key-rotation persister is ready.
+  const settingsApi = attachSettings(
     ctx,
     {
       agents: resolved.agents,
-      agentCard: {
-        name: resolved.server.agentCard.name,
-        description: resolved.server.agentCard.description,
-      },
+      serverAgents: resolved.server.agents,
+      apiKey: resolved.server.apiKey,
+    },
+    {
+      cwd: resolved.server.cwd,
+      sharedCwd: resolved.server.sharedCwd,
+      workspaceTitle: resolved.server.workspaceTitle,
+      provider: resolved.server.provider,
+      model: resolved.server.model,
+      preset: resolved.server.preset,
     },
     (value) => {
       registry.update(value.agents)
-      serverRef.agentCard = value.agentCard
-      server?.updateCard(value.agentCard)
+      const first = value.serverAgents[0]
+      serverRef.agentCard = {
+        name: first?.name ?? '',
+        description: first?.description ?? '',
+      }
+      server?.reconcileAgents(value.serverAgents, buildExecutor)
+      // Hot-apply the endpoint key (and keep the running server in sync).
+      resolved.server.apiKey = value.apiKey
     },
   )
+  registerA2aRoutes(ctx, serverRef, settingsApi.persistApiKey)
 }
 
 /** Re-attach persisted `a2a-*` conversations to the grouping workspace. */

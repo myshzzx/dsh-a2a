@@ -36,6 +36,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { type Session, SessionId } from '@deepseek-ai/dsh-session'
 
 export interface ExecutorOptions {
+  /** URL slug of this agent (namespaces the session id, e.g. 'docs'). */
+  agentId: string
   /** Preset mounted into each conversation agent. */
   preset: string
   /** Per-turn deadline; a slow turn is cancelled instead of left running. */
@@ -115,10 +117,10 @@ interface RunningTurn {
   contextId: string
 }
 
-/** Derive a stable dsh session id from an A2A context id. */
-export function sessionIdFor(contextId: string): SessionId {
+/** Derive a stable dsh session id from an A2A context id, namespaced by agent. */
+export function sessionIdFor(agentId: string, contextId: string): SessionId {
   const digest = createHash('sha256').update(contextId).digest('hex').slice(0, 24)
-  return SessionId(`a2a-${digest}`)
+  return SessionId(`a2a-${agentId}-${digest}`)
 }
 
 /**
@@ -368,7 +370,11 @@ export class DshAgentExecutor implements AgentExecutor {
     )
     try {
       const overrides = this.overridesOf(requestContext, contextId)
-      const turn = await this.openTurn(sessionIdFor(contextId), contextId, overrides)
+      const turn = await this.openTurn(
+        sessionIdFor(this.options.agentId, contextId),
+        contextId,
+        overrides,
+      )
       this.running.set(taskId, turn)
       turn.agent.followup(
         createUserMessage({
@@ -434,6 +440,25 @@ export class DshAgentExecutor implements AgentExecutor {
         metadata: {},
       }),
     )
+  }
+
+  /**
+   * Cancel and release every running turn, then drop the tracking table. Used
+   * when a served agent is removed or rebuilt live so in-flight turns never
+   * outlive the route that owned them. Idle sessions are left to the harness
+   * (they stay adoptable); this only stops the currently-running turns.
+   */
+  async dispose(): Promise<void> {
+    const turns = [...this.running.values()]
+    this.running.clear()
+    for (const turn of turns) {
+      try {
+        turn.agent.cancel({ kind: 'user' })
+        await turn.dispose()
+      } catch {
+        // best-effort: a session that already closed must never block removal
+      }
+    }
   }
 
   /**
@@ -636,9 +661,15 @@ export class DshAgentExecutor implements AgentExecutor {
     const model = overrides.model ?? route?.model
     if (provider !== undefined && model !== undefined) return { provider, model }
     if (overrides.provider !== undefined || overrides.model !== undefined) {
-      throw new Error(
-        'dsh-a2a: the request overrode the model route but no provider/model pair could be completed; set server.provider and server.model',
+      // A half-override the deployment cannot complete (e.g. a bare model with
+      // no provider anywhere): fall back to the configured/default route rather
+      // than failing the task. A caller cannot act on an error naming a route it
+      // does not administer, so answer on the route it would get without the
+      // override and say so.
+      this.ctx.logger.warn(
+        'dsh-a2a: ignored a model override the deployment could not complete (no provider/model pair); using the configured route',
       )
+      return route
     }
     return undefined
   }
@@ -750,11 +781,11 @@ export class DshAgentExecutor implements AgentExecutor {
    * `sharedCwd` on, every session instead runs in `<base>/shared` — the fence
    * still bounds writes, but all callers share one directory.
    *
-   * Directory naming: `A2A-{caller}-{MMDD}-{hash6}` — a readable slug of
-   * the caller's contextId, the session's first-seen month-day, and 6 hash
-   * chars of the stable session id so slug collisions can never merge or
-   * split a caller's identity. Sessions minted before readable naming (raw
-   * session-id dirs) are adopted as-is, so live sessions never move.
+   * Directory naming: `A2A-{caller}-{MMDD}-{HHMMSS}-{hash6}` — a readable slug
+   * of the caller's contextId, the session's first-seen month-day plus creation
+   * time, and 6 hash chars of the stable session id so slug collisions can
+   * never merge or split a caller's identity. Sessions minted before readable
+   * naming (raw session-id dirs) are adopted as-is, so live sessions never move.
    */
   private sessionDir(sessionId: SessionId, contextId: string): string {
     const base = this.options.cwd ?? process.cwd()
@@ -772,7 +803,11 @@ export class DshAgentExecutor implements AgentExecutor {
       contextId
         .replace(/[^A-Za-z0-9_-]+/g, '-')
         .replace(/^-+|-+$/g, '')
-        .slice(0, 24) || 'caller'
+        .slice(0, 24)
+        // The 24-char cut can land on a hyphen (a UUID-style contextId), which
+        // would render a `--` before the timestamp; trim it so the dir reads
+        // `A2A-<caller>-<MMDD>-<HHMMSS>-<hash6>`.
+        .replace(/-+$/, '') || 'caller'
     const d = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
     const stamp = `${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`

@@ -10,6 +10,7 @@ describe('resolveConfig', () => {
       port: 8899,
       preset: 'standard',
       turnTimeoutMs: 300_000,
+      callTimeoutMs: 300_000,
       sharedCwd: false,
       agentCard: { name: 'dsh-a2a' },
     })
@@ -18,13 +19,20 @@ describe('resolveConfig', () => {
 
   it('defaults to per-session dirs and honours sharedCwd', () => {
     expect(resolveConfig({}).server.sharedCwd).toBe(false)
-    expect(resolveConfig({ server: { sharedCwd: true } }).server.sharedCwd).toBe(true)
+    const shared = resolveConfig({ server: { sharedCwd: true } })
+    expect(shared.server.sharedCwd).toBe(true)
+    // The server-level flag must be mirrored onto every resolved agent: the
+    // executor reads `agent.sharedCwd`, so a missing field would silently
+    // fall back to per-session dirs.
+    expect(shared.server.agents.length).toBeGreaterThan(0)
+    expect(shared.server.agents.every((agent) => agent.sharedCwd)).toBe(true)
   })
 
   it('rejects out-of-range ports and non-positive timeouts', () => {
     expect(() => resolveConfig({ server: { port: 0 } })).toThrow(/server.port/)
     expect(() => resolveConfig({ server: { port: 70_000 } })).toThrow(/server.port/)
     expect(() => resolveConfig({ server: { turnTimeoutMs: 0 } })).toThrow(/turnTimeoutMs/)
+    expect(() => resolveConfig({ server: { callTimeoutMs: 0 } })).toThrow(/callTimeoutMs/)
   })
 
   it('rejects malformed registry entries', () => {
