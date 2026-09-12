@@ -33,7 +33,7 @@ import { type Agent, installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { type Session, SessionId } from '@deepseek-ai/dsh-session'
 
 export interface ExecutorOptions {
   /** Preset mounted into each conversation agent. */
@@ -281,6 +281,24 @@ export function collectReplyText(events: readonly SessionEvent[]): string {
   return texts.length > 0 ? texts.join('\n') : '（该轮没有文本回复）'
 }
 
+/**
+ * The event log of one agent session.
+ *
+ * The `Session.events` getter was replaced by `Session.snapshotEvents()` in
+ * newer harness builds. Reading the old property there yields `undefined`,
+ * and iterating it throws `TypeError: events is not iterable` — which is what
+ * a version skew between this plugin and the harness surfaces as. Read
+ * through whichever accessor the running harness actually provides.
+ */
+function sessionEvents(session: Session): readonly SessionEvent[] {
+  const log = session as unknown as {
+    snapshotEvents?: () => readonly SessionEvent[]
+    events?: readonly SessionEvent[]
+  }
+  if (typeof log.snapshotEvents === 'function') return log.snapshotEvents()
+  return log.events ?? []
+}
+
 function withDeadline<T>(
   promise: Promise<T>,
   millis: number,
@@ -359,7 +377,12 @@ export class DshAgentExecutor implements AgentExecutor {
       // artifacts BEFORE the terminal status: the SDK's execution queue ends
       // the event stream at the first terminal statusUpdate, so artifacts
       // published afterwards would never reach the caller.
-      await this.publishCardArtifacts(eventBus, taskId, contextId, turn.agent.session.events)
+      await this.publishCardArtifacts(
+        eventBus,
+        taskId,
+        contextId,
+        sessionEvents(turn.agent.session),
+      )
       // The reply must ride ON the terminal status: publishing a separate
       // message first would strand the task in WORKING forever in the task
       // store.
@@ -369,7 +392,7 @@ export class DshAgentExecutor implements AgentExecutor {
           contextId,
           status: status(
             TaskStateEnum.TASK_STATE_COMPLETED,
-            agentMessage(collectReplyText(turn.agent.session.events), taskId, contextId),
+            agentMessage(collectReplyText(sessionEvents(turn.agent.session)), taskId, contextId),
           ),
           metadata: {},
         }),
